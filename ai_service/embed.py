@@ -14,6 +14,10 @@ def test_rag_pipeline():
         response = requests.post("http://localhost:8080/rag/search", data=json.dumps(payload), headers=headers)
         print("Go Gateway Response Status:", response.status_code)
         data = response.json()
+        
+        # Print cache status here!
+        print(f"⚡ Served from LRU Cache: {data.get('cached')}")
+        
         print("\n--- Retrieved RAG Context Chunks ---")
         for chunk in data.get("context_chunks", []):
             print(f"[{chunk['id']}] (Score: {chunk['score']:.2f}): {chunk['text']}")

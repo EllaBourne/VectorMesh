@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"container/list"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,24 +10,95 @@ import (
 	"time"
 )
 
+// SearchRequest represents the incoming user query and vector
 type SearchRequest struct {
 	QueryText   string    `json:"query_text"`
 	QueryVector []float32 `json:"query_vector"`
 	TopK        int       `json:"top_k"`
 }
 
+// SearchResult represents a retrieved document chunk
 type SearchResult struct {
 	ID    string  `json:"id"`
 	Text  string  `json:"text"`
 	Score float32 `json:"score"`
 }
 
+// RAGResponse represents the final assembled prompt and chunks
 type RAGResponse struct {
 	ContextChunks   []SearchResult `json:"context_chunks"`
 	GeneratedPrompt string         `json:"generated_prompt"`
+	Cached          bool           `json:"cached"`
 }
 
-// Concurrently queries a worker shard using Go routines and channels
+// --- Thread-Safe LRU Cache Implementation ---
+type cacheItem struct {
+	key   string
+	value RAGResponse
+}
+
+type LRUCache struct {
+	capacity  int
+	evictList *list.List
+	items     map[string]*list.Element
+	lock      sync.Mutex
+}
+
+func NewLRUCache(capacity int) *LRUCache {
+	return &LRUCache{
+		capacity:  capacity,
+		evictList: list.New(),
+		items:     make(map[string]*list.Element),
+	}
+}
+
+func (c *LRUCache) Get(key string) (RAGResponse, bool) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	if elem, exists := c.items[key]; exists {
+		c.evictList.MoveToFront(elem)
+		return elem.Value.(*cacheItem).value, true
+	}
+	return RAGResponse{}, false
+}
+
+func (c *LRUCache) Put(key string, value RAGResponse) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	// Check if already exists
+	if elem, exists := c.items[key]; exists {
+		c.evictList.MoveToFront(elem)
+		elem.Value.(*cacheItem).value = value
+		return
+	}
+
+	// Evict oldest if at capacity
+	if c.evictList.Len() >= c.capacity {
+		oldest := c.evictList.Back()
+		if oldest != nil {
+			c.evictList.Remove(oldest)
+			kv := oldest.Value.(*cacheItem)
+			delete(c.items, kv.key)
+		}
+	}
+
+	// Add new item
+	item := &cacheItem{key: key, value: value}
+	elem := c.evictList.PushFront(item)
+	c.items[key] = elem
+}
+
+// Initialize a global cache with a capacity of 100 items
+var queryCache = NewLRUCache(100)
+
+// Helper to generate a cache key from the query text
+func getCacheKey(req SearchRequest) string {
+	return req.QueryText
+}
+
+// Concurrently queries a worker shard using Go routines
 func queryWorker(nodeURL string, req SearchRequest, wg *sync.WaitGroup, resultsChan chan<- []SearchResult) {
 	defer wg.Done()
 
@@ -60,13 +132,22 @@ func handleRAGSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Distributed cluster worker shards
+	cacheKey := getCacheKey(req)
+
+	// 1. Check LRU Cache first (Cache Hit)
+	if cachedResp, found := queryCache.Get(cacheKey); found {
+		cachedResp.Cached = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(cachedResp)
+		return
+	}
+
+	// 2. Cache Miss: Perform Distributed Fan-Out
 	workers := []string{"http://localhost:9001"}
 
 	var wg sync.WaitGroup
 	resultsChan := make(chan []SearchResult, len(workers))
 
-	// Fan-out query concurrently across worker nodes
 	for _, worker := range workers {
 		wg.Add(1)
 		go queryWorker(worker, req, &wg, resultsChan)
@@ -75,13 +156,12 @@ func handleRAGSearch(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 	close(resultsChan)
 
-	// Aggregate and rank results from shards
 	var allChunks []SearchResult
 	for res := range resultsChan {
 		allChunks = append(allChunks, res...)
 	}
 
-	// Construct the RAG Prompt for the LLM layer
+	// Construct RAG Prompt
 	promptContext := "Context Information:\n"
 	for _, chunk := range allChunks {
 		promptContext += fmt.Sprintf("- [ID: %s, Score: %.2f] %s\n", chunk.ID, chunk.Score, chunk.Text)
@@ -91,7 +171,11 @@ func handleRAGSearch(w http.ResponseWriter, r *http.Request) {
 	ragResp := RAGResponse{
 		ContextChunks:   allChunks,
 		GeneratedPrompt: promptContext,
+		Cached:          false,
 	}
+
+	// 3. Store in LRU Cache for future requests
+	queryCache.Put(cacheKey, ragResp)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ragResp)
@@ -99,6 +183,6 @@ func handleRAGSearch(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	http.HandleFunc("/rag/search", handleRAGSearch)
-	fmt.Println("VectorMesh Go Gateway running on port 8080...")
+	fmt.Println("VectorMesh Go Gateway with LRU Cache running on port 8080...")
 	http.ListenAndServe(":8080", nil)
 }

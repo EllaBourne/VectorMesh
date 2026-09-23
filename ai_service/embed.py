@@ -1,25 +1,28 @@
 import requests
 import json
 
-def generate_embedding_and_search(text_query):
-    mock_vector = [0.12,0.34,0.56]
-    
+def test_rag_pipeline():
     payload = {
-        "query_vector": mock_vector,
-        "top_k": 5
+        "query_text": "How does VectorMesh handle scaling?",
+        "query_vector": [0.1, 0.2, 0.3],
+        "top_k": 2
     }
     
-    headers = {"Content-Type":"application/json"}
+    headers = {"Content-Type": "application/json"}
     
     try:
-        # Make sure it has /search at the end!
-        response = requests.post("http://localhost:8080/search", data=json.dumps(payload), headers=headers)
-        print("Gateway Response Status:",response.status_code)
-        print("Retrived Shared Results:", response.json())
+        response = requests.post("http://localhost:8080/rag/search", data=json.dumps(payload), headers=headers)
+        print("Go Gateway Response Status:", response.status_code)
+        data = response.json()
+        print("\n--- Retrieved RAG Context Chunks ---")
+        for chunk in data.get("context_chunks", []):
+            print(f"[{chunk['id']}] (Score: {chunk['score']:.2f}): {chunk['text']}")
+            
+        print("\n--- Final Assembled LLM Prompt ---")
+        print(data.get("generated_prompt"))
     except Exception as e:
-        print("Error connecting to VectorMesh gateway:", e)
-    
+        print("Error connecting to Go Gateway:", e)
+
 if __name__ == "__main__":
-    print("Testing VectorMesh Pipeline from Python Client...")
-    generate_embedding_and_search("How do I Scale Microservices?")
-    
+    print("Testing Go-based VectorMesh RAG Pipeline...")
+    test_rag_pipeline()

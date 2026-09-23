@@ -2,7 +2,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 import math
 
-# Simple Cosine Similarity implementation
 def cosine_similarity(a, b):
     if len(a) != len(b) or len(a) == 0:
         return 0.0
@@ -19,18 +18,22 @@ class ShardHandler(BaseHTTPRequestHandler):
         post_data = self.rfile.read(content_length)
         req = json.loads(post_data.decode('utf-8'))
         
-        query_vector = req.get("query_vector", [])
+        query_vector = req.get("query_vector", [0.1, 0.2, 0.3])
         
-        # Mock local shard dataset
+        # Shard dataset containing vectors AND text chunks for RAG
         shard_data = [
-            {"id": "vector_doc_1", "vector": [0.1, 0.2, 0.3]},
-            {"id": "vector_doc_2", "vector": [0.4, 0.5, 0.6]}
+            {"id": "doc_101", "text": "VectorMesh uses concurrent Go routines to fan-out queries across distributed database shards.", "vector": [0.1, 0.2, 0.3]},
+            {"id": "doc_102", "text": "RAG pipelines combine semantic vector search with LLM context window assembly.", "vector": [0.4, 0.5, 0.6]}
         ]
         
         results = []
         for doc in shard_data:
             score = cosine_similarity(query_vector, doc["vector"])
-            results.append({"id": doc["id"], "score": score})
+            results.append({
+                "id": doc["id"],
+                "text": doc["text"],
+                "score": score
+            })
             
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -40,7 +43,7 @@ class ShardHandler(BaseHTTPRequestHandler):
 def run_worker(port=9001):
     server_address = ('', port)
     httpd = HTTPServer(server_address, ShardHandler)
-    print(f"VectorMesh Shard Worker running on port {port}...")
+    print(f"VectorMesh RAG Shard Worker running on port {port}...")
     httpd.serve_forever()
 
 if __name__ == '__main__':
